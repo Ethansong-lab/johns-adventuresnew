@@ -1,0 +1,423 @@
+import pygame
+import sys
+import random
+
+# Initialize Pygame
+pygame.init()
+
+# Screen setup
+WIDTH, HEIGHT = 800, 600
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Platformer: Rescue the Princess at Wave 5")
+
+# Clock
+clock = pygame.time.Clock()
+FPS = 60
+
+# Colors
+GREEN       = (0, 255, 0)
+RED         = (255, 0, 0)
+YELLOW      = (255, 230, 0)
+BLACK       = (0, 0, 0)
+WHITE       = (255, 255, 255)
+CLOUD_COLOR = (245, 245, 245)
+JAIL_GRAY   = (100, 100, 100)
+
+# Helper to load images with error checking
+def load_image(path, size=None):
+    try:
+        img = pygame.image.load(path).convert_alpha()
+        if size:
+            img = pygame.transform.scale(img, size)
+        return img
+    except Exception as e:
+        print(f"Error loading image at {path!r}: {e}")
+        return None
+
+# ——— Load Background —————————————————————————————————————————————————————
+# Download from: https://wallpapercave.com/wp/wp7619435.jpg
+background_img = load_image("background.jpg", (1600, HEIGHT))
+if not background_img:
+    background_img = pygame.Surface((1600, HEIGHT))
+    background_img.fill((50, 50, 100))
+WORLD_WIDTH = 1600  # total world width for scrolling
+
+# ——— Load Player Sprites —————————————————————————————————————————————————————
+player_img      = load_image(r"ex'\Boy with Slingshot\Idle\idle4.png",         (50, 50))
+player_img_walk = load_image(r"ex'\Boy with Slingshot\Walk\Walk1.png",          (50, 50))
+player_img_jump = load_image(r"ex'\Boy with Slingshot\Jump\Jump without attack.png", (50, 50))
+
+if not player_img:
+    player_img = pygame.Surface((50, 50)); player_img.fill(YELLOW)
+if not player_img_walk:
+    player_img_walk = pygame.Surface((50, 50)); player_img_walk.fill((200, 200, 0))
+if not player_img_jump:
+    player_img_jump = pygame.Surface((50, 50)); player_img_jump.fill((255, 150, 0))
+
+# ——— Load Princess Sprite Sheet —————————————————————————————————————————————
+# The user-provided sheet: "/mnt/data/64eb51af-dc8b-48ae-8d6d-f076fc40def5.png"
+princess_sheet = load_image("/mnt/data/64eb51af-dc8b-48ae-8d6d-f076fc40def5.png", (80, 80))
+if not princess_sheet:
+    princess_sheet = pygame.Surface((80, 80))
+    princess_sheet.fill((255, 100, 200))
+
+# ——— Game Variables ——————————————————————————————————————————————————————
+gravity = 1
+jump_strength = -20
+bullets = []
+
+# ——— Platforms ——————————————————————————————————————————————————————————
+# Define platforms in world coordinates (added some extras)
+platforms = [
+    pygame.Rect(0,    550, 800, 50),    # ground segment 1
+    pygame.Rect(800,  550, 800, 50),    # ground segment 2
+    pygame.Rect(150,  450, 200, 20),
+    pygame.Rect(450,  350, 200, 20),
+    pygame.Rect(100,  250, 150, 20),
+    pygame.Rect(400,  150, 250, 20),
+    pygame.Rect(900,  450, 200, 20),
+    pygame.Rect(1100, 350, 200, 20),
+    pygame.Rect(1300, 250, 150, 20),
+    pygame.Rect(600,  200, 180, 20),    # extra platform
+    pygame.Rect(1400, 300, 150, 20)     # extra platform
+]
+
+# ——— Cloud Class ————————————————————————————————————————————————————————
+class Cloud:
+    def __init__(self, x, y, scale, speed):
+        self.x = x
+        self.y = y
+        self.scale = scale
+        self.speed = speed
+        r = int(20 * scale)
+        self.circles = [
+            (-r,           0, int(r * 0.9)),
+            (0,          -r // 2, int(r * 1.1)),
+            (r,            0, int(r * 0.9)),
+            (0,           r // 2, int(r * 0.8))
+        ]
+
+    def update(self):
+        self.x -= self.speed
+        # Wrap around within world width + buffer
+        if self.x + int(60 * self.scale) < 0:
+            self.x = WORLD_WIDTH + int(60 * self.scale)
+
+    def draw(self, surface, camera_x):
+        # Parallax: clouds move slower (factor 0.5)
+        draw_x = self.x - camera_x * 0.5
+        for dx, dy, rad in self.circles:
+            cx = int(draw_x + dx)
+            cy = int(self.y + dy)
+            pygame.draw.circle(surface, CLOUD_COLOR, (cx, cy), rad)
+
+clouds = [
+    Cloud(100, 100, scale=1.0, speed=0.5),
+    Cloud(400,  80, scale=1.2, speed=0.3),
+    Cloud(700, 120, scale=0.8, speed=0.7),
+    Cloud(1200,  50, scale=1.5, speed=0.2)
+]
+
+# ——— Enemy Class with Chasing Behavior ————————————————————————————————————————
+class Enemy(pygame.sprite.Sprite):
+    def __init__(self, x, y, speed):
+        super().__init__()
+        face_img = load_image(r"ex'\Transparent PNG\2.png", (40, 40))
+        if face_img:
+            self.image = face_img
+        else:
+            self.image = pygame.Surface((40, 40))
+            self.image.fill(YELLOW)
+            pygame.draw.circle(self.image, BLACK, (10, 12), 3)
+            pygame.draw.circle(self.image, BLACK, (30, 12), 3)
+            pygame.draw.rect(self.image, BLACK, (12, 25, 16, 4))
+        self.rect = self.image.get_rect(topleft=(x, y))
+        self.speed = speed
+        self.vel_y = 0
+        self.on_ground = False
+
+    def update(self):
+        # Horizontal chasing: move toward player's x
+        if player.state == "alive":
+            if self.rect.x < player.rect.x:
+                self.rect.x += self.speed
+            elif self.rect.x > player.rect.x:
+                self.rect.x -= self.speed
+
+        # Enforce world boundaries
+        if self.rect.left < 0:
+            self.rect.left = 0
+        if self.rect.right > WORLD_WIDTH:
+            self.rect.right = WORLD_WIDTH
+
+        # Apply gravity
+        self.vel_y += gravity
+        self.rect.y += self.vel_y
+
+        # Platform collision for enemy
+        self.on_ground = False
+        for platform in platforms:
+            if self.rect.colliderect(platform) and self.vel_y > 0:
+                self.rect.bottom = platform.top
+                self.vel_y = 0
+                self.on_ground = True
+                break
+
+    def draw(self, surface, camera_x):
+        draw_pos = (self.rect.x - camera_x, self.rect.y)
+        surface.blit(self.image, draw_pos)
+
+# ——— Player Class with Dying State and Side Borders ——————————————————————————
+class Player(pygame.sprite.Sprite):
+    def __init__(self):
+        super().__init__()
+        self.orig_image = player_img
+        self.image = self.orig_image
+        self.rect = self.image.get_rect(center=(100, 150))
+        self.vel_y = 0
+        self.on_ground = False
+        self.facing_right = True
+        self.state = "alive"
+        self.death_timer = 0
+
+    def start_dying(self):
+        if self.state == "alive":
+            self.state = "dying"
+            self.death_timer = 20  # shrink over 20 frames
+
+    def update(self, keys):
+        if self.state == "dying":
+            self.handle_death_animation()
+            return
+
+        # Horizontal movement
+        if keys[pygame.K_d]:
+            self.image = player_img_walk
+            self.rect.x += 5
+            self.facing_right = True
+        elif keys[pygame.K_a]:
+            self.image = player_img_walk
+            self.rect.x -= 5
+            self.facing_right = False
+        else:
+            self.image = player_img
+
+        # Enforce world boundaries
+        if self.rect.left < 0:
+            self.rect.left = 0
+        if self.rect.right > WORLD_WIDTH:
+            self.rect.right = WORLD_WIDTH
+
+        # Jump
+        if keys[pygame.K_w] and self.on_ground:
+            self.image = player_img_jump
+            self.vel_y = jump_strength
+            self.on_ground = False
+
+        # Apply gravity
+        self.vel_y += gravity
+        self.rect.y += self.vel_y
+
+        # Platform collision for player
+        self.on_ground = False
+        for platform in platforms:
+            if self.rect.colliderect(platform) and self.vel_y > 0:
+                self.rect.bottom = platform.top
+                self.vel_y = 0
+                self.on_ground = True
+                break
+
+    def handle_death_animation(self):
+        if self.death_timer > 0:
+            factor = self.death_timer / 20.0
+            new_w = max(1, int(self.orig_image.get_width() * factor))
+            new_h = max(1, int(self.orig_image.get_height() * factor))
+            scaled = pygame.transform.scale(self.orig_image, (new_w, new_h))
+            center_x, center_y = self.rect.center
+            self.image = scaled
+            self.rect = self.image.get_rect(center=(center_x, center_y))
+            self.death_timer -= 1
+        else:
+            pygame.quit()
+            sys.exit()
+
+    def draw(self, surface, camera_x):
+        draw_pos = (self.rect.x - camera_x, self.rect.y)
+        surface.blit(self.image, draw_pos)
+
+# ——— Princess Class (shown in jail at wave 5) ——————————————————————————————————
+class Princess:
+    def __init__(self, x, y):
+        self.image = princess_sheet
+        self.rect = self.image.get_rect(midbottom=(x, y))
+
+    def draw(self, surface, camera_x):
+        draw_pos = (self.rect.x - camera_x, self.rect.y)
+        surface.blit(self.image, draw_pos)
+        # Draw jail bars over princess
+        bar_width = 5
+        spacing = 15
+        for i in range(0, self.rect.width, spacing):
+            bx = draw_pos[0] + i
+            pygame.draw.rect(surface, JAIL_GRAY, (bx, draw_pos[1] - 5, bar_width, self.rect.height + 10))
+
+# ——— Wave & Enemy Management ———————————————————————————————————————————————
+wave_number = 1
+enemies = pygame.sprite.Group()
+princess_active = False
+princess = None
+
+def spawn_wave(n):
+    """
+    Spawn 'n' enemies with increasing speed, but at wave 5, show the princess instead.
+    """
+    global princess_active, princess
+    if n < 5:
+        for _ in range(n):
+            speed = 2 + (wave_number - 1) * 0.5
+            choice = random.choice(platforms)
+            x = random.randint(choice.x, choice.x + choice.width - 40)
+            y = choice.top - 40
+            enemies.add(Enemy(x, y, speed))
+    elif n == 5:
+        # Activate princess at world x=1500, y=550 (ground)
+        princess_active = True
+        princess = Princess(1500, 550)
+
+# Spawn initial wave
+spawn_wave(wave_number)
+
+# ——— Create Player & Groups —————————————————————————————————————————————
+player = Player()
+
+# ——— Main Game Loop ——————————————————————————————————————————————————————
+running = True
+while running:
+    clock.tick(FPS)
+    keys = pygame.key.get_pressed()
+
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+        if event.type == pygame.KEYDOWN and event.key == pygame.K_SPACE and player.state == "alive":
+            bullet_speed = 10 if player.facing_right else -10
+            rect = pygame.Rect(player.rect.centerx, player.rect.centery, 10, 5)
+            bullets.append({"rect": rect, "speed": bullet_speed})
+
+    # Update clouds
+    for cloud in clouds:
+        cloud.update()
+
+    # Update player & enemies
+    player.update(keys)
+    enemies.update()
+
+    # If all enemies are defeated and princess not active, spawn next wave
+    if not princess_active and len(enemies) == 0 and player.state == "alive":
+        wave_number += 1
+        spawn_wave(wave_number)
+
+    # Player–enemy collision
+    if player.state == "alive":
+        for enemy in enemies:
+            if player.rect.colliderect(enemy.rect):
+                player.start_dying()
+                break
+
+    # Move bullets and check collisions
+    for bullet in bullets[:]:
+        bullet["rect"].x += bullet["speed"]
+        for enemy in enemies:
+            if bullet["rect"].colliderect(enemy.rect):
+                enemies.remove(enemy)
+                if bullet in bullets:
+                    bullets.remove(bullet)
+                break
+        if bullet["rect"].right < 0 or bullet["rect"].left > WORLD_WIDTH:
+            if bullet in bullets:
+                bullets.remove(bullet)
+
+    # Calculate camera offset to center player (clamped to world)
+    camera_x = max(0, min(player.rect.centerx - WIDTH // 2, WORLD_WIDTH - WIDTH))
+
+    # Draw scrolling background
+    screen.blit(background_img, (-camera_x, 0))
+
+    # Draw clouds (parallax)
+    for cloud in clouds:
+        cloud.draw(screen, camera_x)
+
+    # Draw platforms (shifted by camera_x)
+    for platform in platforms:
+        draw_rect = pygame.Rect(platform.x - camera_x, platform.y, platform.width, platform.height)
+        pygame.draw.rect(screen, GREEN, draw_rect)
+
+    # Draw player & enemies (shifted by camera_x)
+    player.draw(screen, camera_x)
+    for enemy in enemies:
+        enemy.draw(screen, camera_x)
+
+    # Draw bullets
+    for bullet in bullets:
+        bx = bullet["rect"].x - camera_x
+        by = bullet["rect"].y
+        pygame.draw.rect(screen, RED, pygame.Rect(bx, by, bullet["rect"].width, bullet["rect"].height))
+
+    # If wave 5, draw princess in jail and rescue message when reached
+    if princess_active:
+        princess.draw(screen, camera_x)
+        if player.rect.colliderect(princess.rect):
+            font = pygame.font.SysFont(None, 72)
+            text = font.render("You saved the princess!", True, WHITE)
+            screen.blit(text, (WIDTH//2 - text.get_width()//2, HEIGHT//2 - text.get_height()//2))
+
+    # Draw wave counter
+    font = pygame.font.SysFont(None, 36)
+    wave_text = font.render(f"Wave: {wave_number}", True, WHITE)
+    screen.blit(wave_text, (10, 10))
+
+    pygame.display.update()
+
+# Initialize Pygame
+pygame.init()
+
+# Screen setup
+WIDTH, HEIGHT = 800, 600
+screen = pygame.display.set_mode((WIDTH, HEIGHT))
+pygame.display.set_caption("Platformer with Castle")
+
+# Load the castle image
+castle_image = pygame.image.load("assets/castle.png").convert_alpha()
+castle_rect = castle_image.get_rect()
+castle_world_x = 1450  # X position in the game world
+castle_rect.bottomleft = (castle_world_x, 550)  # Align with ground level
+
+# Camera
+camera_x = 0
+scroll_speed = 5
+
+# Main loop
+running = True
+while running:
+    for event in pygame.event.get():
+        if event.type == pygame.QUIT:
+            running = False
+
+    # Scroll
+    keys = pygame.key.get_pressed()
+    if keys[pygame.K_d]:
+        camera_x += scroll_speed
+    if keys[pygame.K_a]:
+        camera_x -= scroll_speed
+
+    # Draw background
+    screen.fill((50, 50, 100))  # Dark blue background
+    pygame.draw.rect(screen, (30, 160, 40), (0, 550, WIDTH, 50))  # Ground
+
+    # Calculate castle position relative to camera
+    screen.blit(castle_image, (castle_world_x - camera_x, castle_rect.top))
+
+    pygame.display.flip()
+
+    pygame.quit()
+sys.exit()
